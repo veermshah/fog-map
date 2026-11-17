@@ -1,5 +1,9 @@
 # Fog Map
 
+**Hosted demo:** https://veermshah.github.io/fog-map/
+
+The hosted site is published from the account’s existing GitHub Pages deployment. It displays recorded model measurements; run the CLI for new experiments. The `docs/` folder can also be published from this standalone repository or a fork.
+
 Compare three independent interpretations of a Markdown specification. Each
 persona produces a data model, API sketch, and line-attributed assumptions;
 ranked HTML and Markdown reports show where their implementation choices differ.

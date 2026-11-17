@@ -1,6 +1,6 @@
 # Standalone repository
 
-Intended destination: https://github.com/veermshah/fog-map
+Repository: https://github.com/veermshah/fog-map
 
 This checkout contains the completed fog-map project and its measured evidence. Start with [README.md](README.md). Model weights and secrets are not included.
 
