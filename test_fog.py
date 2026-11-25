@@ -5,6 +5,7 @@ from unittest.mock import patch
 import io
 import json
 import fog
+from api import analyze as web
 
 class FogTests(unittest.TestCase):
     def test_sample_disagreements_and_lines(self):
@@ -48,6 +49,68 @@ class FogTests(unittest.TestCase):
 
     def test_empty_recognized_topics(self):
         self.assertEqual(fog.compare('Build a blue button.', [fog.offline('Build a blue button.', p) for p in fog.PERSONAS]), [])
+
+    def test_keywords_match_whole_words_only(self):
+        self.assertEqual(fog.recognized_topics('Users paste a steam link gracefully.'), [])
+        self.assertEqual(fog.recognized_topics('Teams can edit past entries daily.'),
+                         [(1, 'day boundary'), (1, 'team habit ownership'), (1, 'historical edits')])
+        self.assertEqual(fog.recognized_topics('Send a reminder.\nNotifications go out.'),
+                         [(1, 'notification delivery'), (2, 'notification delivery')])
+
+    def test_sample_topics_unchanged_by_word_matching(self):
+        spec = Path('sample-spec.md').read_text()
+        self.assertEqual(len(fog.recognized_topics(spec)), 6)
+        self.assertEqual(len(fog.analyze(spec)['findings']), 6)
+
+    def test_spec_limits(self):
+        for bad in ('', '   \n', None, 'x' * (fog.MAX_SPEC_CHARS + 1), 'a\n' * (fog.MAX_SPEC_LINES + 1)):
+            with self.assertRaises(ValueError):
+                fog.check_spec(bad)
+
+    def test_non_object_model_response_fails_loudly(self):
+        response = dict(model='m', choices=[{'message': {'content': '[1, 2]'}}])
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'placeholder'}), patch('urllib.request.urlopen', return_value=io.BytesIO(json.dumps(response).encode())):
+            with self.assertRaises(ValueError):
+                fog.remote('daily habits', 'QA engineer', 'api')
+
+    def test_cli_writes_reports(self):
+        with tempfile.TemporaryDirectory() as td, patch('sys.argv', ['fog.py', 'sample-spec.md', '--out', td]):
+            fog.main()
+            evidence = json.loads((Path(td) / 'evidence.json').read_text())
+            self.assertEqual(len(evidence['findings']), 6)
+            self.assertTrue((Path(td) / 'raw-interpretations.json').exists())
+            self.assertNotIn('\u2014', (Path(td) / 'report.md').read_text())
+
+
+class WebApiTests(unittest.TestCase):
+    def test_offline_by_default_even_with_key(self):
+        with patch.dict('os.environ', {'OPENAI_API_KEY': 'k'}, clear=True):
+            self.assertEqual(web.configured_backend(), 'offline')
+        with patch.dict('os.environ', {'FOG_LIVE_BACKEND': 'api'}, clear=True):
+            self.assertEqual(web.configured_backend(), 'offline')
+        with patch.dict('os.environ', {'FOG_LIVE_BACKEND': 'api', 'OPENAI_API_KEY': 'k'}, clear=True):
+            self.assertEqual(web.configured_backend(), 'api')
+
+    def test_run_sample(self):
+        with patch.dict('os.environ', {}, clear=True):
+            status, body = web.run(json.dumps({'spec': Path('sample-spec.md').read_text()}).encode())
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body['findings']), 6)
+        self.assertEqual(body['backend'], 'offline')
+        self.assertEqual(body['line_count'], 7)
+
+    def test_run_rejects_bad_input(self):
+        self.assertEqual(web.run(b'not json')[0], 400)
+        self.assertEqual(web.run(b'[1]')[0], 400)
+        self.assertEqual(web.run(b'{"spec": ""}')[0], 400)
+        self.assertEqual(web.run(b'{"spec": 5}')[0], 400)
+        self.assertEqual(web.run(json.dumps({'spec': 'x' * (fog.MAX_SPEC_CHARS + 1)}).encode())[0], 400)
+
+    def test_raw_provider_text_not_returned(self):
+        answer = dict(persona='QA engineer', provider_evidence=dict(model='m', usage={}, raw_content='secret-ish'))
+        self.assertNotIn('raw_content', web.public_interpretation(answer)['provider_evidence'])
+        self.assertIn('raw_content', answer['provider_evidence'])
+
 
 if __name__ == '__main__':
     unittest.main()

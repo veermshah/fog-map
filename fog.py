@@ -11,6 +11,8 @@ import urllib.request
 import time
 
 PERSONAS = ['backend engineer', 'frontend engineer', 'QA engineer']
+MAX_SPEC_CHARS = 20_000
+MAX_SPEC_LINES = 400
 # Explicit offline policy alternatives, NOT model-generated interpretations.
 RULES = [
  ('daily', 'day boundary', 3, ['UTC calendar day', 'user local calendar day', 'rolling 24-hour window']),
@@ -20,12 +22,34 @@ RULES = [
  ('notif', 'notification delivery', 2, ['email at 20:00 UTC', 'in-app banner at local 20:00', 'push two hours before each personal deadline']),
 ]
 
+# Whole-word patterns for each rule keyword. Plain substring matching flagged
+# words such as "paste", "steam" or "gracefully" as ambiguity topics.
+PATTERNS = {
+    'daily': re.compile(r'\b(daily|every day|each day|per day)\b', re.I),
+    'grace': re.compile(r'\bgrace\b', re.I),
+    'team': re.compile(r'\b(teams?|teammates?)\b', re.I),
+    'past': re.compile(r'\b(past|historical|retroactive(ly)?)\b', re.I),
+    'notif': re.compile(r'\b(notif\w*|remind\w*)', re.I),
+}
+
+
+def matches(word, line):
+    """True when a source line mentions the rule keyword as a whole word."""
+    return bool(PATTERNS[word].search(line))
+
+
+def recognized_topics(spec):
+    """(line, topic) pairs found by the keyword catalog, in source order."""
+    return [(i, topic) for i, line in enumerate(spec.splitlines(), 1)
+            for word, topic, _, _ in RULES if matches(word, line)]
+
+
 def offline(spec, persona):
     i = PERSONAS.index(persona)
     decisions = []
     for line, content in enumerate(spec.splitlines(), 1):
         for word, topic, impact, choices in RULES:
-            if word in content.lower():
+            if matches(word, content):
                 decisions.append(dict(line=line, topic=topic, impact=impact, assumption=choices[i]))
     models = [
         {'Habit': ['id', 'owner_id', 'team_id'], 'CheckIn': ['habit_id', 'user_id', 'utc_date']},
@@ -52,7 +76,7 @@ def remote(spec, persona, backend, evidence_dir=None):
                  'historical edits': 'What is the edit time limit, and do edits recompute streaks?',
                  'notification delivery': 'Which channel, recipients, and trigger time?'}
     slots = [dict(line=i, topic=topic, question=questions[topic]) for i, line in enumerate(spec.splitlines(), 1)
-             for word, topic, _, _ in RULES if word in line.lower()]
+             for word, topic, _, _ in RULES if matches(word, line)]
     prompt = (f"You are a {persona}. {priorities[persona]}\n"
               "Independently design the application described below. Make concrete choices wherever the spec is ambiguous.\n"
               "Return one JSON object with keys data_model (object mapping entity names to field lists), "
@@ -93,6 +117,8 @@ def remote(spec, persona, backend, evidence_dir=None):
     content = re.sub(r'<think>.*?</think>', '', content, flags=re.S).strip()
     content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
     answer = json.loads(content)
+    if not isinstance(answer, dict):
+        raise ValueError(f'{persona} response was JSON but not an object')
     answer['persona'] = persona
     answer['provider_evidence'] = dict(model=result.get('model', body['model']), usage=result.get('usage'), elapsed_seconds=round(time.monotonic()-started, 3), raw_content=raw_content)
     return answer
@@ -141,13 +167,54 @@ def compare(spec, answers):
                            disagreeing_pairs=disagreements, impact=impact, severity=disagreements * impact))
     return sorted(result, key=lambda r: (-r['severity'], r['line'], r['topic']))
 
+def backend_label(backend):
+    if backend == 'offline':
+        return 'OFFLINE RULES DEMO: authored policies, no LLM calls or independent model evidence'
+    return f'Live {backend}: three independent model requests'
+
+
+def check_spec(spec):
+    """Reject empty or oversized specs before any model work starts."""
+    if not isinstance(spec, str) or not spec.strip():
+        raise ValueError('Spec is empty')
+    if len(spec) > MAX_SPEC_CHARS:
+        raise ValueError(f'Spec is {len(spec):,} characters; the limit is {MAX_SPEC_CHARS:,}')
+    if len(spec.splitlines()) > MAX_SPEC_LINES:
+        raise ValueError(f'Spec has {len(spec.splitlines())} lines; the limit is {MAX_SPEC_LINES}')
+    return spec
+
+
+def analyze(spec, backend='offline', evidence_dir=None):
+    """Run three independent interpretations and compare them.
+
+    Shared by the CLI and the web API. Returns a dict with the validated
+    interpretations, ranked findings, and a human-readable backend label.
+    """
+    if backend not in ('offline', 'api', 'ollama'):
+        raise ValueError(f'Unknown backend {backend!r}')
+    check_spec(spec)
+
+    def interpret(persona):
+        return offline(spec, persona) if backend == 'offline' else remote(spec, persona, backend, evidence_dir)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        raw = list(pool.map(interpret, PERSONAS))
+    if evidence_dir is not None:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / 'raw-interpretations.json').write_text(json.dumps(raw, indent=2))
+    answers = [validate(a, len(spec.splitlines())) for a in raw]
+    findings = compare(spec, answers)
+    return dict(backend=backend, label=backend_label(backend), interpretations=answers, findings=findings,
+                topics_recognized=len(recognized_topics(spec)))
+
+
 def write_reports(out, spec, answers, findings, backend):
     out.mkdir(parents=True, exist_ok=True)
-    label = 'OFFLINE RULES DEMO — no LLM calls or independent model evidence' if backend == 'offline' else f'Live {backend}: three independent model requests'
+    label = backend_label(backend)
     md = ['# Fog Map ambiguity report', '', label, '',
           'Severity = differing agent pairs (0–3) × maximum impact (1–3). Textual comparison; semantically equivalent phrasing can be overflagged.', '']
     for rank, f in enumerate(findings, 1):
-        md += [f"## {rank}. {f['topic']} — severity {f['severity']}/9", f"Line {f['line']}: {f['spec']}", '']
+        md += [f"## {rank}. {f['topic']}: severity {f['severity']}/9", f"Line {f['line']}: {f['spec']}", '']
         md += [f"- **{p}:** {v}" for p, v in f['assumptions'].items()]
         md += ['']
     md += ['## Full interpretations', '']
@@ -169,20 +236,17 @@ def main():
     parser.add_argument('--backend', choices=['offline', 'api', 'ollama'], default='offline')
     parser.add_argument('--out', type=Path, default=Path('output'))
     args = parser.parse_args()
-    spec = args.spec.read_text()
-    if not spec.strip():
-        parser.error('Spec is empty')
-    def interpret(persona):
-        a = offline(spec, persona) if args.backend == 'offline' else remote(spec, persona, args.backend, args.out)
-        return a
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        answers = list(pool.map(interpret, PERSONAS))
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / 'raw-interpretations.json').write_text(json.dumps(answers, indent=2))
-    answers = [validate(a, len(spec.splitlines())) for a in answers]
-    findings = compare(spec, answers)
-    write_reports(args.out, spec, answers, findings, args.backend)
-    print(f'{args.backend}: {len(answers)} interpretations; {len(findings)} ambiguities; {args.out}/report.html')
+    if not args.spec.is_file():
+        parser.error(f'Spec file not found: {args.spec}')
+    spec = args.spec.read_text(encoding='utf-8')
+    try:
+        result = analyze(spec, args.backend, args.out)
+    except ValueError as error:
+        parser.exit(2, f'fog: {error}\n')
+    write_reports(args.out, spec, result['interpretations'], result['findings'], args.backend)
+    print(f"{args.backend}: {len(result['interpretations'])} interpretations; "
+          f"{len(result['findings'])} ambiguities; {args.out}/report.html")
+
 
 if __name__ == '__main__':
     main()
