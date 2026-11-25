@@ -1,0 +1,8 @@
+# Keep the deployed bundle to the site, the API function and its shared module.
+output/
+output-live-attempt*/
+models/
+*.gguf
+*.gguf.part
+__pycache__/
+.venv/

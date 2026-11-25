@@ -1,8 +1,13 @@
 # Fog Map
 
-**Hosted demo:** https://veermshah.github.io/fog-map/
+**Live app:** https://fog-map-pi.vercel.app/ (Vercel, with the web analyzer)
 
-The hosted site is published from the account’s existing GitHub Pages deployment. It displays recorded model measurements; run the CLI for new experiments. The `docs/` folder can also be published from this standalone repository or a fork.
+**Static mirror:** https://veermshah.github.io/fog-map/ (GitHub Pages, recorded run only)
+
+Paste a spec into the live app and get a ranked list of the decisions it leaves
+open. The Vercel deployment serves the `docs/` site plus a Python function at
+`/api/analyze`. GitHub Pages has no server, so there the analyzer is disabled
+and the page points to the CLI.
 
 Compare three independent interpretations of a Markdown specification. Each
 persona produces a data model, API sketch, and line-attributed assumptions;
@@ -35,6 +40,41 @@ Qwen3-4B Q4 GPU target**. This is one small spec, not a validated general ambigu
 detector. Earlier 0.6B schema/quality failures and a constrained-decoding runtime
 stall are retained in [LIVE_ATTEMPTS.md](LIVE_ATTEMPTS.md) and their artifact folders.
 No live output was manually repaired. No paid API was used.
+
+## Web app on Vercel
+
+The Vercel project is connected to this repository: pushes to `main` deploy to
+production and pull requests get preview deployments. Configuration lives in
+`vercel.json` (static output from `docs/`, one Python function in `api/`).
+
+`POST /api/analyze` takes `{"spec": "..."}` (up to 20,000 characters and 400
+lines) and returns the ranked findings and the three interpretations as JSON.
+`GET /api/analyze` reports which backend the deployment uses. Specs are not
+stored. The page can copy the result as Markdown or download it as Markdown or
+JSON, ready to paste into a ticket or a spec review.
+
+By default the function runs the **offline rules demo**, which costs nothing and
+only recognizes the five topic families described below. To have the hosted app
+make real model calls, set these in the Vercel project's environment variables
+and redeploy:
+
+| Variable | Value |
+|---|---|
+| `FOG_LIVE_BACKEND` | `api` |
+| `OPENAI_API_KEY` | key for any OpenAI-compatible provider |
+| `OPENAI_BASE_URL` | optional, for example `https://ai-gateway.vercel.sh/v1` for Vercel AI Gateway |
+| `FOG_MODEL` | optional model id, default `gpt-4o-mini` |
+
+Live mode only switches on when both `FOG_LIVE_BACKEND=api` and a key are set.
+Each analysis then makes three paid model calls, and the endpoint is public, so
+add a Vercel Firewall rate limit before turning it on. Raw provider text is
+kept out of API responses.
+
+To run the site and API together locally (standard library only):
+
+```sh
+python dev_server.py   # http://127.0.0.1:8080/
+```
 
 ## Setup and offline demo
 
@@ -98,7 +138,8 @@ silently substitutes the offline backend.
 ## Ranking and limits
 
 The prototype recognizes five topic families (daily/day boundary, grace,
-team ownership, historical edits, notifications). Recognized source lines become
+team ownership, historical edits, notifications). Keywords match whole words,
+so "paste" or "steam" no longer trigger the historical-edit or team topics. Recognized source lines become
 common topic questions for all three models, allowing attributable comparison.
 When no families match, the prompt requests open-ended ambiguity discovery.
 This catalog is limited; new domains can need additional topic rules.
@@ -143,7 +184,9 @@ python build_pages.py
 python verify_pages.py
 ```
 
-Both scripts use only Python's standard library. The build takes its data from
+Both scripts use only Python's standard library. The page's analyzer script is
+edited in `web/app.js` and copied into `docs/assets/` by the build; CI fails if
+`docs/` is out of date with the generator. The build takes its data from
 `output-live-1.7b/`, preserves the evidence file bytes, and uses only relative
 asset links, so the site works at a repository subpath such as `/fog-map/`.
 The verification starts a temporary HTTP server and checks that exact project
